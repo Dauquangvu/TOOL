@@ -91,29 +91,98 @@ export default function Home() {
     setPredReason('AI đang phân tích...'); setDebugMsg('')
 
     try {
-      const res = await fetch('/api/predict', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ history: currentHist })
-      })
-      const data = await res.json()
-      if (data.error) {
-        setDebugMsg('Lỗi: ' + data.error)
-        setPredBadge('w'); setPredReason('Lỗi API: ' + data.error.slice(0,100))
-        setDot('on', 'Lỗi API')
-      } else {
-        entry.predicted = data.color; entry.confidence = data.confidence; entry.reason = data.reason
-        const updated = [...predsRef.current]; updated[newIdx] = { ...entry }
-        setPreds(updated); predsRef.current = updated; save(currentHist, updated)
-        setPredBadge('ok'); setPredColor(data.color)
-        setPredName(CL[data.color]?.lbl || data.color)
-        setPredConf(String(data.confidence)); setPredReason(data.reason)
-        setDot('on', 'Đang theo dõi...')
+      const apiKey = process.env.NEXT_PUBLIC_AI_KEY
+      const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://1gw.gwai.cloud/v1/messages'
+
+      if (!apiKey) {
+        setDebugMsg('Lỗi: Thiếu NEXT_PUBLIC_AI_KEY trong environment')
+        setPredBadge('w'); setPredReason('Lỗi cấu hình: Thiếu API key')
+        setDot('on', 'Lỗi cấu hình')
+        setThinking(false); thinkingRef.current = false
+        return
       }
+
+      const cR = currentHist.filter(c => c === 'red').length
+      const cB = currentHist.filter(c => c === 'blue').length
+      const cG = currentHist.filter(c => c === 'green').length
+
+      const prompt = `Bạn là AI phân tích pattern màu trong trò chơi.
+
+Lịch sử (${currentHist.length} lần): ${currentHist.join(', ')}
+10 lần gần nhất: ${currentHist.slice(-10).join(', ')}
+Đỏ:${cR} Xanh:${cB} Lá:${cG}
+
+Dự đoán màu TIẾP THEO. Trả lời JSON duy nhất, không thêm gì khác:
+{"color":"red|blue|green","confidence":0-100,"reason":"lý do ngắn ≤80 ký tự"}`
+
+      const res = await fetch(baseUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'Authorization': `Bearer ${apiKey}`,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-3-5-haiku-20241022',
+          max_tokens: 200,
+          messages: [{ role: 'user', content: prompt }]
+        })
+      })
+
+      const rawText = await res.text()
+
+      let data
+      try {
+        data = JSON.parse(rawText)
+      } catch {
+        if (rawText.includes('<!DOCTYPE') || rawText.includes('<html')) {
+          setDebugMsg('Lỗi: Proxy trả về HTML thay vì JSON. Có thể bị chặn hoặc lỗi cấu hình.')
+          setPredBadge('w'); setPredReason('Lỗi: Proxy trả HTML (bị chặn?)')
+          setDot('on', 'Lỗi proxy')
+        } else {
+          setDebugMsg('Lỗi: Không parse được JSON - ' + rawText.slice(0, 100))
+          setPredBadge('w'); setPredReason('Lỗi: Response không hợp lệ')
+          setDot('on', 'Lỗi')
+        }
+        setThinking(false); thinkingRef.current = false
+        return
+      }
+
+      if (data.error) {
+        const errMsg = typeof data.error === 'string' ? data.error : JSON.stringify(data.error)
+        setDebugMsg('Lỗi API: ' + errMsg)
+        setPredBadge('w'); setPredReason('Lỗi API: ' + errMsg.slice(0,100))
+        setDot('on', 'Lỗi API')
+        setThinking(false); thinkingRef.current = false
+        return
+      }
+
+      let text = ''
+      if (data.content?.[0]?.text) text = data.content[0].text
+      else if (data.choices?.[0]?.message?.content) text = data.choices[0].message.content
+
+      const match = text.match(/\{[\s\S]*?\}/)
+      if (!match) {
+        setDebugMsg('Lỗi: Không tìm thấy JSON trong response - ' + text.slice(0, 100))
+        setPredBadge('w'); setPredReason('Lỗi: AI không trả JSON')
+        setDot('on', 'Lỗi')
+        setThinking(false); thinkingRef.current = false
+        return
+      }
+
+      const parsed = JSON.parse(match[0])
+      entry.predicted = parsed.color; entry.confidence = parsed.confidence; entry.reason = parsed.reason
+      const updated = [...predsRef.current]; updated[newIdx] = { ...entry }
+      setPreds(updated); predsRef.current = updated; save(currentHist, updated)
+      setPredBadge('ok'); setPredColor(parsed.color)
+      setPredName(CL[parsed.color]?.lbl || parsed.color)
+      setPredConf(String(parsed.confidence)); setPredReason(parsed.reason)
+      setDot('on', 'Đang theo dõi...')
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       setDebugMsg('Lỗi kết nối: ' + msg); setPredBadge('w')
-      setPredReason('Lỗi kết nối'); setDot('on', 'Lỗi')
+      setPredReason('Lỗi kết nối: ' + msg.slice(0, 50)); setDot('on', 'Lỗi')
     }
     setThinking(false); thinkingRef.current = false
   }, [save, setDot])
